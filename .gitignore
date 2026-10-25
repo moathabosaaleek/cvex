@@ -1,0 +1,13 @@
+# Binary
+/cvex
+/dist/
+
+# Local database. WAL mode leaves the -shm and -wal files behind.
+*.db
+*.db-shm
+*.db-wal
+
+.DS_Store
+*.swp
+.idea/
+CLAUDE.md
