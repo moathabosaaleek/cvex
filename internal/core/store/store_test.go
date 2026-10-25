@@ -178,3 +178,96 @@ func TestSourceStateRoundTrip(t *testing.T) {
 		t.Error("last_fetch not recorded")
 	}
 }
+
+// A bad WHERE here doesn't error, it just returns nothing, which would show up
+// much later as an empty feed in the UI.
+func TestItemsFilters(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	now := time.Now().UTC()
+	hourAgo := now.Add(-time.Hour)
+	lastMonth := now.AddDate(0, 0, -30)
+
+	items := []model.Item{
+		{ID: "kev:CVE-2026-1", Source: "kev", ExternalID: "CVE-2026-1", Kind: model.KindCVE,
+			Title: "Acme Gateway unauthenticated RCE", Published: &now, Fetched: now},
+		{ID: "krebs:1", Source: "krebs", ExternalID: "1", Kind: model.KindNews,
+			Title: "Ransomware crew hits hospital", Summary: "Acme Gateway was the way in",
+			Published: &hourAgo, Fetched: now},
+		{ID: "krebs:2", Source: "krebs", ExternalID: "2", Kind: model.KindNews,
+			Title: "Something from last month", Published: &lastMonth, Fetched: lastMonth},
+	}
+	if err := s.UpsertItems(ctx, items); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetStarred(ctx, "krebs:2", true); err != nil {
+		t.Fatal(err)
+	}
+
+	ids := func(t *testing.T, q model.FeedQuery) []string {
+		t.Helper()
+		got, err := s.Items(ctx, q)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := make([]string, len(got))
+		for i, it := range got {
+			out[i] = it.ID
+		}
+		return out
+	}
+
+	t.Run("kind", func(t *testing.T) {
+		got := ids(t, model.FeedQuery{Kinds: []model.Kind{model.KindCVE}})
+		if len(got) != 1 || got[0] != "kev:CVE-2026-1" {
+			t.Errorf("want just the cve, got %v", got)
+		}
+	})
+
+	t.Run("search covers summary", func(t *testing.T) {
+		// "Acme Gateway" sits in one title and one summary, so this fails if
+		// the query only looks at titles.
+		if got := ids(t, model.FeedQuery{Search: "Acme Gateway"}); len(got) != 2 {
+			t.Errorf("want both, got %v", got)
+		}
+	})
+
+	t.Run("starred only", func(t *testing.T) {
+		got := ids(t, model.FeedQuery{StarredOnly: true})
+		if len(got) != 1 || got[0] != "krebs:2" {
+			t.Errorf("want krebs:2, got %v", got)
+		}
+	})
+
+	t.Run("since", func(t *testing.T) {
+		cutoff := now.AddDate(0, 0, -1)
+		if got := ids(t, model.FeedQuery{Since: &cutoff}); len(got) != 2 {
+			t.Errorf("want the two recent items, got %v", got)
+		}
+	})
+
+	t.Run("limit and offset", func(t *testing.T) {
+		first := ids(t, model.FeedQuery{Limit: 1})
+		second := ids(t, model.FeedQuery{Limit: 1, Offset: 1})
+		if len(first) != 1 || len(second) != 1 {
+			t.Fatalf("want one row each, got %v and %v", first, second)
+		}
+		if first[0] != "kev:CVE-2026-1" {
+			t.Errorf("newest should come first, got %s", first[0])
+		}
+		if second[0] == first[0] {
+			t.Errorf("offset returned the same row: %s", second[0])
+		}
+	})
+
+	t.Run("filters combine", func(t *testing.T) {
+		got := ids(t, model.FeedQuery{
+			Kinds:  []model.Kind{model.KindNews},
+			Search: "Acme",
+		})
+		if len(got) != 1 || got[0] != "krebs:1" {
+			t.Errorf("want krebs:1, got %v", got)
+		}
+	})
+}
