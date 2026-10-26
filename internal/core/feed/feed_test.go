@@ -27,6 +27,33 @@ func TestExtractCVEs(t *testing.T) {
 	}
 }
 
+func TestExtractCVEsBoundaries(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		// Used to come back as CVE-2026-1234567 and link the story to a
+		// different vulnerability entirely.
+		{"See CVE-2026-12345678 today", "CVE-2026-12345678"},
+		{"xCVE-2026-1234y", ""},
+		{"CVE-2026-123 is too short", ""},
+		{"ends the line: CVE-2026-1234", "CVE-2026-1234"},
+	}
+
+	for _, c := range cases {
+		got := ExtractCVEs(c.in)
+		if c.want == "" {
+			if got != nil {
+				t.Errorf("%q matched %v, want nothing", c.in, got)
+			}
+			continue
+		}
+		if len(got) != 1 || got[0].Value != c.want {
+			t.Errorf("%q gave %v, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 func TestExtractCVEsOnNothing(t *testing.T) {
 	if got := ExtractCVEs("", "no identifiers here"); got != nil {
 		t.Errorf("want nil, got %v", got)

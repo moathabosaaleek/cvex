@@ -31,31 +31,37 @@ func DefaultKEV() KEV {
 
 func (KEV) Name() string { return "kev" }
 
+// Entries stay as RawMessage so the bytes we store are the bytes CISA sent.
+// Marshalling kevRecord back out would quietly drop every field we don't model
+// yet, and the mirror only serves the current catalogue, so anything lost that
+// way is lost for good.
 type kevPayload struct {
-	CatalogVersion  string `json:"catalogVersion"`
-	DateReleased    string `json:"dateReleased"`
-	Vulnerabilities []struct {
-		CVEID             string `json:"cveID"`
-		VendorProject     string `json:"vendorProject"`
-		Product           string `json:"product"`
-		VulnerabilityName string `json:"vulnerabilityName"`
-		DateAdded         string `json:"dateAdded"`
-		ShortDescription  string `json:"shortDescription"`
-		RequiredAction    string `json:"requiredAction"`
-		DueDate           string `json:"dueDate"`
+	CatalogVersion  string            `json:"catalogVersion"`
+	DateReleased    string            `json:"dateReleased"`
+	Vulnerabilities []json.RawMessage `json:"vulnerabilities"`
+}
 
-		// Strings, not bools: "Known" or "Unknown".
-		KnownRansomwareCampaignUse string `json:"knownRansomwareCampaignUse"`
+type kevRecord struct {
+	CVEID             string `json:"cveID"`
+	VendorProject     string `json:"vendorProject"`
+	Product           string `json:"product"`
+	VulnerabilityName string `json:"vulnerabilityName"`
+	DateAdded         string `json:"dateAdded"`
+	ShortDescription  string `json:"shortDescription"`
+	RequiredAction    string `json:"requiredAction"`
+	DueDate           string `json:"dueDate"`
 
-		// "Yes" or "No". Yes means CISA thinks you should assume compromise
-		// and go looking. Captured but not scored yet.
-		ForensicTriage string `json:"forensicTriage"`
+	// Strings, not bools: "Known" or "Unknown".
+	KnownRansomwareCampaignUse string `json:"knownRansomwareCampaignUse"`
 
-		// Usually one or more advisory URLs, occasionally prose.
-		Notes string `json:"notes"`
+	// "Yes" or "No". Yes means CISA thinks you should assume compromise and go
+	// looking. Captured but not scored yet.
+	ForensicTriage string `json:"forensicTriage"`
 
-		CWEs []string `json:"cwes"`
-	} `json:"vulnerabilities"`
+	// Usually one or more advisory URLs, occasionally prose.
+	Notes string `json:"notes"`
+
+	CWEs []string `json:"cwes"`
 }
 
 func (k KEV) Collect(ctx context.Context, f *Fetcher, prev Conditional) (Result, error) {
@@ -72,8 +78,6 @@ func (k KEV) Collect(ctx context.Context, f *Fetcher, prev Conditional) (Result,
 		return Result{}, fmt.Errorf("decode kev: %w", err)
 	}
 	if len(payload.Vulnerabilities) == 0 {
-		// A valid-but-empty catalogue means CISA changed the shape on us, which
-		// is worth failing loudly rather than wiping the feed.
 		return Result{}, fmt.Errorf("kev catalogue %q had no entries", payload.CatalogVersion)
 	}
 
@@ -84,15 +88,28 @@ func (k KEV) Collect(ctx context.Context, f *Fetcher, prev Conditional) (Result,
 		KEV:   make([]model.KEVEntry, 0, len(payload.Vulnerabilities)),
 	}
 
-	for _, v := range payload.Vulnerabilities {
-		if v.CVEID == "" {
+	undated := 0
+	for _, raw := range payload.Vulnerabilities {
+		var v kevRecord
+		if err := json.Unmarshal(raw, &v); err != nil {
+			return Result{}, fmt.Errorf("decode kev entry: %w", err)
+		}
+
+		// Upper-cased to match what ExtractCVEs does to ids it scrapes out of
+		// news text. entities is UNIQUE on (kind, value) and SQLite compares
+		// case-sensitively, so one stray lowercase id here would quietly create
+		// a second node and break the join the whole design rests on.
+		cve := strings.ToUpper(strings.TrimSpace(v.CVEID))
+		if cve == "" {
 			continue
 		}
 
 		added := parseKEVDate(v.DateAdded)
-		ransomware := v.KnownRansomwareCampaignUse == "Known"
+		if added == nil {
+			undated++
+		}
 
-		entities := []model.Entity{{Kind: model.EntityCVE, Value: v.CVEID}}
+		entities := []model.Entity{{Kind: model.EntityCVE, Value: cve}}
 		if v.VendorProject != "" {
 			entities = append(entities, model.Entity{Kind: model.EntityVendor, Value: v.VendorProject})
 		}
@@ -103,42 +120,55 @@ func (k KEV) Collect(ctx context.Context, f *Fetcher, prev Conditional) (Result,
 			entities = append(entities, model.Entity{Kind: model.EntityCWE, Value: cwe})
 		}
 
-		raw, err := json.Marshal(v)
-		if err != nil {
-			return Result{}, err
-		}
-
 		out.Items = append(out.Items, model.Item{
-			ID:         itemID(k.Name(), v.CVEID),
+			ID:         itemID(k.Name(), cve),
 			Source:     k.Name(),
-			ExternalID: v.CVEID,
+			ExternalID: cve,
 			Kind:       model.KindCVE,
-			Title:      kevTitle(v.CVEID, v.VendorProject, v.Product, v.VulnerabilityName),
+			Title:      kevTitle(cve, v.VendorProject, v.Product, v.VulnerabilityName),
 			Summary:    v.ShortDescription,
-			URL:        linkFor(v.CVEID, v.Notes),
+			URL:        linkFor(cve, v.Notes),
 			Published:  added,
-			Fetched:   now,
-			Entities:  entities,
-			Raw:       raw,
+			Fetched:    now,
+			Entities:   entities,
+			Raw:        raw,
 		})
 
 		out.KEV = append(out.KEV, model.KEVEntry{
-			CVE:        v.CVEID,
-			DateAdded:  added,
-			Ransomware: ransomware,
+			CVE: cve,
+			// Its own copy. Sharing one pointer with Item.Published means a
+			// consumer normalising a date in place silently rewrites this too.
+			DateAdded:  copyTime(added),
+			Ransomware: v.KnownRansomwareCampaignUse == "Known",
 		})
+	}
+
+	// Decoding can succeed on a renamed field and leave every record empty, so
+	// the count check above is not enough on its own. Without this, a schema
+	// change returns a successful empty Result, the caller stores the fresh
+	// ETag, and every poll after it 304s. The feed would report that nothing on
+	// earth is being exploited, permanently, with no error anywhere.
+	if len(out.Items) == 0 {
+		return Result{}, fmt.Errorf("kev catalogue %q: %d entries, none with a cveID",
+			payload.CatalogVersion, len(payload.Vulnerabilities))
+	}
+	if undated == len(out.Items) {
+		return Result{}, fmt.Errorf("kev catalogue %q: dateAdded parsed on none of %d entries",
+			payload.CatalogVersion, len(out.Items))
 	}
 
 	return out, nil
 }
 
-var linkRE = regexp.MustCompile(`https?://\S+`)
+// Stops at the characters that usually sit around a URL in prose rather than
+// inside one. KEV notes wrap links in parentheses often enough to matter.
+var linkRE = regexp.MustCompile(`https?://[^\s<>"')\]]+`)
 
 // KEV entries have no link field. notes usually holds a vendor advisory, which
 // beats a generic NVD page, so take the first URL out of it when there is one.
 func linkFor(cve, notes string) string {
 	if u := linkRE.FindString(notes); u != "" {
-		return strings.TrimRight(u, ".,;")
+		return strings.TrimRight(u, ".,;:")
 	}
 	return "https://nvd.nist.gov/vuln/detail/" + cve
 }
@@ -160,4 +190,12 @@ func parseKEVDate(s string) *time.Time {
 	}
 	t = t.UTC()
 	return &t
+}
+
+func copyTime(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+	c := *t
+	return &c
 }

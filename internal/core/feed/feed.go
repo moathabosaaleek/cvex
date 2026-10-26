@@ -14,13 +14,10 @@ import (
 	"github.com/moathabosaaleek/cvex/internal/core/model"
 )
 
+// Per-source, not global. Some WAFs reject anything that doesn't look like a
+// browser and at least one source does the exact opposite, so collectors that
+// need something else pass their own.
 const defaultUA = "cvex/0.1 (+https://github.com/moathabosaaleek/cvex)"
-
-// Some WAFs reject anything that doesn't look like a browser. At least one
-// source does the exact opposite: BleepingComputer serves a plain client fine
-// and 403s Chrome. There is no right global answer, so it's per-source.
-const browserUA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " +
-	"AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
 // Conditional is what a source told us last time, so the next fetch can ask
 // for nothing if nothing changed. KEV and EPSS are both multi-megabyte files
@@ -61,10 +58,6 @@ type response struct {
 	etag         string
 	lastModified string
 	notModified  bool
-}
-
-func (f *Fetcher) get(ctx context.Context, url string, prev Conditional) (*response, error) {
-	return f.getAs(ctx, url, defaultUA, prev)
 }
 
 func (f *Fetcher) getAs(ctx context.Context, url, ua string, prev Conditional) (*response, error) {
@@ -109,7 +102,10 @@ func (f *Fetcher) getAs(ctx context.Context, url, ua string, prev Conditional) (
 	}, nil
 }
 
-var cveRE = regexp.MustCompile(`(?i)CVE-\d{4}-\d{4,7}`)
+// No upper bound on the sequence digits: the id space is not capped and a
+// truncating match is worse than no match, since CVE-2026-12345678 would come
+// back as CVE-2026-1234567 and link the story to a different vulnerability.
+var cveRE = regexp.MustCompile(`(?i)\bCVE-\d{4}-\d{4,}\b`)
 
 // ExtractCVEs scrapes CVE ids out of free text. This is the whole mechanism by
 // which a news headline ends up linked to the CVE record it's about.
