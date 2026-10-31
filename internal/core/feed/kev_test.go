@@ -23,7 +23,7 @@ func kevServer(t *testing.T, body []byte) *httptest.Server {
 			w.WriteHeader(http.StatusNotModified)
 			return
 		}
-		w.Write(body)
+		_, _ = w.Write(body)
 	}))
 	t.Cleanup(srv.Close)
 	return srv

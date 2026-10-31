@@ -1,0 +1,28 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    # Aimed at what this codebase actually does: HTTP in feed, database/sql
+    # in store.
+    - bodyclose
+    - rowserrcheck
+    - sqlclosecheck
+    # Adding a model.Kind should break every switch that needs updating
+    # instead of silently falling through to default.
+    - exhaustive
+    - misspell
+
+  settings:
+    exhaustive:
+      default-signifies-exhaustive: true
+
+    errcheck:
+      # An unchecked type assertion panics at runtime rather than returning a
+      # bool. On code that parses third-party JSON that is one malformed feed
+      # away from taking the whole thing down.
+      check-type-assertions: true
+
+# No exclusions. Errors that genuinely cannot be acted on are discarded
+# explicitly at the call site, so the decision shows up in review rather than
+# living in this file.

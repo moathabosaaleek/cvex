@@ -38,13 +38,13 @@ func Open(path string) (*Store, error) {
 	}
 	for _, p := range pragmas {
 		if _, err := db.Exec(p); err != nil {
-			db.Close()
+			_ = db.Close()
 			return nil, fmt.Errorf("%s: %w", p, err)
 		}
 	}
 
 	if _, err := db.Exec(schema); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
 
@@ -64,7 +64,7 @@ func (s *Store) UpsertItems(ctx context.Context, items []model.Item) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	ins, err := tx.PrepareContext(ctx, `
 		INSERT INTO items (id, source, external_id, kind, title, summary, url, published, fetched, raw)
@@ -78,7 +78,7 @@ func (s *Store) UpsertItems(ctx context.Context, items []model.Item) error {
 	if err != nil {
 		return err
 	}
-	defer ins.Close()
+	defer func() { _ = ins.Close() }()
 
 	for _, it := range items {
 		_, err := ins.ExecContext(ctx, it.ID, it.Source, it.ExternalID, string(it.Kind),
@@ -164,7 +164,7 @@ func (s *Store) Items(ctx context.Context, q model.FeedQuery) ([]model.Item, err
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var items []model.Item
 	for rows.Next() {
@@ -220,7 +220,7 @@ func (s *Store) attachEntities(ctx context.Context, items []model.Item) error {
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var itemID, kind, value string
@@ -252,7 +252,7 @@ func (s *Store) UpsertKEV(ctx context.Context, entries []model.KEVEntry) error {
 		if err != nil {
 			return err
 		}
-		defer stmt.Close()
+		defer func() { _ = stmt.Close() }()
 
 		for _, e := range entries {
 			if _, err := stmt.ExecContext(ctx, e.CVE, unixOrNil(e.DateAdded), e.Ransomware); err != nil {
@@ -275,7 +275,7 @@ func (s *Store) UpsertEPSS(ctx context.Context, scores []model.EPSSScore) error 
 		if err != nil {
 			return err
 		}
-		defer stmt.Close()
+		defer func() { _ = stmt.Close() }()
 
 		for _, sc := range scores {
 			if _, err := stmt.ExecContext(ctx, sc.CVE, sc.Score, sc.Percentile, now); err != nil {
@@ -298,7 +298,7 @@ func (s *Store) KEV(ctx context.Context, cves []string) (map[string]model.KEVEnt
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var (
@@ -328,7 +328,7 @@ func (s *Store) EPSS(ctx context.Context, cves []string) (map[string]float64, er
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var (
@@ -384,7 +384,7 @@ func (s *Store) inTx(ctx context.Context, fn func(*sql.Tx) error) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	if err := fn(tx); err != nil {
 		return err
 	}
